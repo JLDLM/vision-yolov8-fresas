@@ -1,69 +1,90 @@
 import os
 import cv2
-import numpy as np
 from ultralytics import YOLO
-from pathlib import Path
 
+def cargar_modelo(ruta_modelo):
+    """Carga el modelo entrenado de YOLOv8."""
+    if not os.path.exists(ruta_modelo):
+        raise FileNotFoundError(f"No se encontró el modelo en la ruta: {ruta_modelo}")
+    print(f"[INFO] Cargando modelo desde: {ruta_modelo}...")
+    return YOLO(ruta_modelo)
 
-# modelo_path = r'C:\YOLOV8A25\runs\segment\uteroTodas200ep20\weights/best.pt'
-# modelo_path = r'C:\YOLOV8A25\runs\segment\train\weights/best.pt'
-modelo_path = r'C:\Users\CAPROM\Desktop\REYNA\runs\segment\uteromeromero2\weights/best.pt'
-carpeta_entrada = r'C:\Users\CAPROM\Desktop\REYNA\Final\2.0ProcesoMiomas\ConMioma'
-carpeta_salida = r'C:\Users\CAPROM\Desktop\REYNA\Final\2.0ProcesoMiomas\bbox\ConMioma'
+def crear_video_desde_imagenes(ruta_carpeta_imagenes, modelo, ruta_video_salida, umbral_confianza=0.5, fps=2, segundos_por_foto=3):
+    """
+    Procesa todas las imágenes de una carpeta y genera un video estable,
+    redimensionando los fotogramas para evitar cortes por tamaños diferentes.
+    """
+    extensiones_validas = (".jpg", ".jpeg", ".png", ".webp")
+    
+    if not os.path.exists(ruta_carpeta_imagenes):
+        print(f"[ERROR] La carpeta '{ruta_carpeta_imagenes}' no existe.")
+        return
 
-os.makedirs(carpeta_salida, exist_ok=True)
+    archivos = os.listdir(ruta_carpeta_imagenes)
+    imagenes = sorted([f for f in archivos if f.lower().endswith(extensiones_validas)])
 
-modelo = YOLO(modelo_path)
+    if not imagenes:
+        print(f"[WARN] No hay imágenes válidas en: {ruta_carpeta_imagenes}")
+        return
 
-extensiones_validas = ('.jpg', '.jpeg', '.png', '.bmp')
+    print(f"[INFO] Se encontraron {len(imagenes)} imágenes. Iniciando compilación estable...")
 
-for ruta_img in Path(carpeta_entrada).glob('*'):
-    if not ruta_img.suffix.lower() in extensiones_validas:
-        continue
+    video_writer = None
+    repeticiones_por_frame = int(fps * segundos_por_foto)
+    
+    # Dimensiones estándar para asegurar compatibilidad total en el archivo de video
+    ANCHO_ESTANDAR = 640
+    ALTO_ESTANDAR = 640
 
-    nombre_archivo = ruta_img.stem
-    imagen_original = cv2.imread(str(ruta_img))
-    # imagen_con_contornos = imagen_original.copy()###
+    for nombre_imagen in imagenes:
+        ruta_completa = os.path.join(ruta_carpeta_imagenes, nombre_imagen)
+        
+        # Ejecutar inferencia
+        resultados = modelo(ruta_completa, conf=umbral_confianza, verbose=False)
+        resultado = resultados[0]
+        
+        # .plot() genera la imagen con las máscaras/cajas
+        frame_renderizado = resultado.plot()
 
-    resultados = modelo(imagen_original)[0]
+        # REDIMENSIONAR FORZADO: Evita problemas si cambia el tamaño de la foto original
+        frame_redimensionado = cv2.resize(frame_renderizado, (ANCHO_ESTANDAR, ALTO_ESTANDAR))
 
-    if resultados.masks is not None:
-        for idx, mask in enumerate(resultados.masks.data):
-            # Máscara y redimensionamiento
-            mascara = mask.cpu().numpy().astype('float32')
-            mascara = cv2.resize(mascara, (imagen_original.shape[1], imagen_original.shape[0]))
-            mascara_binaria = (mascara > 0.5).astype('uint8') * 255
+        # Inicializar el video_writer usando codec XVID
+        if video_writer is None:
+            fourcc = cv2.VideoWriter_fourcc(*'XVID')
+            video_writer = cv2.VideoWriter(ruta_video_salida, fourcc, fps, (ANCHO_ESTANDAR, ALTO_ESTANDAR))
+            print(f"[INFO] Creando archivo de video: {ruta_video_salida} ({ANCHO_ESTANDAR}x{ALTO_ESTANDAR}px)...")
 
-            # # Contornos
-             contornos, _ = cv2.findContours(mascara_binaria, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)###
-             cv2.drawContours(imagen_con_contornos, contornos, -1, (0, 255, 0), 2)###
+        # Escribir el fotograma duplicado en el archivo de video (CORREGIDO SIN EL TYPO)
+        for _ in range(repeticiones_por_frame):
+            video_writer.write(frame_redimensionado)
+            
+        print(f"[PROCESADA EN VIDEO] -> {nombre_imagen}")
 
-            # #confianza
-             x, y, w, h = cv2.boundingRect(mascara_binaria)###
-             if resultados.boxes is not None and idx < len(resultados.boxes.conf):###
-             confianza = resultados.boxes.conf[idx].item()###
-                 texto_confianza = f"{confianza:.2f}"###
-                 cv2.putText(imagen_con_contornos, texto_confianza, (x, y - 10),###
-                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)###
+    if video_writer is not None:
+        video_writer.release()
+        print(f"\n[ÉXITO] Archivo de video guardado correctamente en: {ruta_video_salida}")
+    else:
+        print("[ERROR] No se pudo generar el archivo de video.")
 
-            # #POLÍGONO
-             x, y, w, h = cv2.boundingRect(mascara_binaria)
-             mascara_3c = cv2.merge([mascara_binaria]*3)
-             recorte_poligono = cv2.bitwise_and(imagen_original, mascara_3c)
-             recorte_poligono_crop = recorte_poligono[y:y+h, x:x+w]
-             nombre_poligono = os.path.join(carpeta_salida, f"{nombre_archivo}_recorte_poligono_{idx}.jpg")
-             cv2.imwrite(nombre_poligono, recorte_poligono_crop)
-
-            #BBOX
-            if resultados.boxes is not None and idx < len(resultados.boxes.xyxy):
-                bbox = resultados.boxes.xyxy[idx].cpu().numpy().astype(int)
-                x1, y1, x2, y2 = bbox
-                recorte_bbox = imagen_original[y1:y2, x1:x2]
-                nombre_bbox = os.path.join(carpeta_salida, f"{nombre_archivo}_recorte_bbox_{idx}.jpg")
-                cv2.imwrite(nombre_bbox, recorte_bbox)
-
-    # # --- Guardar imagen con contornos y confianza ---
-     salida_img = os.path.join(carpeta_salida, f"{nombre_archivo}_contornos.jpg")###
-     cv2.imwrite(salida_img, imagen_con_contornos)###
-
-print("✅ Solo recortes completados.")
+if __name__ == "__main__":
+    # CONFIGURACIÓN DE RUTAS LOCALES
+    RUTA_MODELO = r"D:\Jair\Fresas6\runs\segment\train\weights\best.pt" 
+    CARPETA_IMAGENES = r"D:\Jair\Fresas6\Imagenes" 
+    VIDEO_SALIDA = r"D:\Jair\Fresas6\resultado_fresas.avi"
+    
+    try:
+        modelo_yolo = cargar_modelo(RUTA_MODELO)
+        
+        # Cada imagen durará 2 segundos en el video para que rinda el set entero de 35 fotos
+        crear_video_desde_imagenes(
+            CARPETA_IMAGENES, 
+            modelo_yolo, 
+            VIDEO_SALIDA, 
+            umbral_confianza=0.6, 
+            fps=2, 
+            segundos_por_foto=2
+        )
+        
+    except Exception as e:
+        print(f"[CRITICAL] Error en la ejecución: {e}")
